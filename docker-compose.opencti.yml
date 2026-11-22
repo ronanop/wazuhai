@@ -1,0 +1,238 @@
+# Companion OpenCTI Community Edition stack for Aegis Global Threat Intel.
+# Keep separate from the main Aegis compose so SOC can boot without CTI RAM cost.
+#
+# Start:  docker compose -f docker-compose.opencti.yml --env-file opencti/.env up -d
+# UI:     http://localhost:8080  (admin@opencti.local / OpenCti@Admin12345)
+# Stop:   docker compose -f docker-compose.opencti.yml --env-file opencti/.env down
+
+name: aegis-opencti
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: aegis-opencti-redis
+    restart: unless-stopped
+    volumes:
+      - opencti_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    container_name: aegis-opencti-elasticsearch
+    restart: unless-stopped
+    volumes:
+      - opencti_es:/usr/share/elasticsearch/data
+    environment:
+      - discovery.type=single-node
+      - xpack.ml.enabled=false
+      - xpack.security.enabled=false
+      - thread_pool.search.queue_size=5000
+      - "ES_JAVA_OPTS=-Xms${ELASTIC_MEMORY_SIZE:-2G} -Xmx${ELASTIC_MEMORY_SIZE:-2G}"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s http://localhost:9200/_cluster/health?wait_for_status=yellow >/dev/null || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  minio:
+    image: pgsty/silo:latest
+    container_name: aegis-opencti-minio
+    restart: unless-stopped
+    volumes:
+      - opencti_s3:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 25s
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: aegis-opencti-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    volumes:
+      - ./opencti/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - opencti_amqp:/var/lib/rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 20s
+      timeout: 20s
+      retries: 5
+
+  opencti:
+    image: opencti/platform:6.4.8
+    container_name: aegis-opencti
+    restart: unless-stopped
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=4096
+      - APP__PORT=8080
+      - APP__BASE_URL=${OPENCTI_EXTERNAL_SCHEME}://${OPENCTI_HOST}:${OPENCTI_PORT}
+      - APP__ADMIN__EMAIL=${OPENCTI_ADMIN_EMAIL}
+      - APP__ADMIN__PASSWORD=${OPENCTI_ADMIN_PASSWORD}
+      - APP__ADMIN__TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - APP__APP_LOGS__LOGS_LEVEL=error
+      - REDIS__HOSTNAME=redis
+      - REDIS__PORT=6379
+      - ELASTICSEARCH__URL=http://elasticsearch:9200
+      - ELASTICSEARCH__NUMBER_OF_REPLICAS=0
+      - MINIO__ENDPOINT=minio
+      - MINIO__PORT=9000
+      - MINIO__USE_SSL=false
+      - MINIO__ACCESS_KEY=${MINIO_ROOT_USER}
+      - MINIO__SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - RABBITMQ__HOSTNAME=rabbitmq
+      - RABBITMQ__PORT=5672
+      - RABBITMQ__PORT_MANAGEMENT=15672
+      - RABBITMQ__MANAGEMENT_SSL=false
+      - RABBITMQ__USERNAME=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ__PASSWORD=${RABBITMQ_DEFAULT_PASS}
+      - SMTP__HOSTNAME=${SMTP_HOSTNAME:-localhost}
+      - SMTP__PORT=25
+      - PROVIDERS__LOCAL__STRATEGY=LocalStrategy
+      - APP__HEALTH_ACCESS_KEY=${OPENCTI_HEALTHCHECK_ACCESS_KEY}
+    ports:
+      - "${OPENCTI_PORT:-8080}:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-qO-",
+          "http://localhost:8080/health?health_access_key=${OPENCTI_HEALTHCHECK_ACCESS_KEY}",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 90s
+
+  worker:
+    image: opencti/worker:6.4.8
+    container_name: aegis-opencti-worker
+    restart: unless-stopped
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - WORKER_LOG_LEVEL=info
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+  connector-export-file-stix:
+    image: opencti/connector-export-file-stix:6.4.8
+    container_name: aegis-opencti-export-stix
+    restart: unless-stopped
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_EXPORT_FILE_STIX_ID}
+      - CONNECTOR_TYPE=INTERNAL_EXPORT_FILE
+      - CONNECTOR_NAME=ExportFileStix2
+      - CONNECTOR_SCOPE=application/json
+      - CONNECTOR_LOG_LEVEL=error
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+  connector-export-file-csv:
+    image: opencti/connector-export-file-csv:6.4.8
+    container_name: aegis-opencti-export-csv
+    restart: unless-stopped
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_EXPORT_FILE_CSV_ID}
+      - CONNECTOR_TYPE=INTERNAL_EXPORT_FILE
+      - CONNECTOR_NAME=ExportFileCsv
+      - CONNECTOR_SCOPE=text/csv
+      - CONNECTOR_LOG_LEVEL=error
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+  connector-import-file-stix:
+    image: opencti/connector-import-file-stix:6.4.8
+    container_name: aegis-opencti-import-stix
+    restart: unless-stopped
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_IMPORT_FILE_STIX_ID}
+      - CONNECTOR_TYPE=INTERNAL_IMPORT_FILE
+      - CONNECTOR_NAME=ImportFileStix
+      - CONNECTOR_VALIDATE_BEFORE_IMPORT=true
+      - CONNECTOR_SCOPE=application/json,text/xml
+      - CONNECTOR_AUTO=true
+      - CONNECTOR_LOG_LEVEL=error
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+  connector-opencti:
+    image: opencti/connector-opencti:6.4.8
+    container_name: aegis-opencti-datasets
+    restart: unless-stopped
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_OPENCTI_ID}
+      - CONNECTOR_NAME=OpenCTI Datasets
+      - CONNECTOR_SCOPE=marking-definition,identity,location
+      - CONNECTOR_LOG_LEVEL=info
+      - CONNECTOR_DURATION_PERIOD=PT24H
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+  connector-mitre:
+    image: opencti/connector-mitre:6.4.8
+    container_name: aegis-opencti-mitre
+    restart: unless-stopped
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_MITRE_ID}
+      - CONNECTOR_NAME=MITRE ATT&CK
+      - CONNECTOR_SCOPE=identity,attack-pattern,course-of-action,intrusion-set,malware,tool,report,vulnerability
+      - CONNECTOR_LOG_LEVEL=info
+      - CONNECTOR_DURATION_PERIOD=P7D
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+volumes:
+  opencti_es:
+  opencti_s3:
+  opencti_redis:
+  opencti_amqp:

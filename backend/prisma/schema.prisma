@@ -1,0 +1,422 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMINISTRATOR
+  SOC_ANALYST
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  DISABLED
+}
+
+enum IncidentStatus {
+  OPEN
+  INVESTIGATING
+  CONTAINED
+  RESOLVED
+  CLOSED
+}
+
+enum IncidentSeverity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  BLOCKED
+  DONE
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model User {
+  id                 String           @id @default(cuid())
+  email              String           @unique
+  name               String
+  passwordHash       String
+  role               Role             @default(SOC_ANALYST)
+  status             UserStatus       @default(ACTIVE)
+  lastLoginAt        DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  auditLogs          AuditLog[]
+  savedHunts         SavedHuntQuery[]
+  findingNotes       FindingNote[]
+  ownedIncidents     Incident[]       @relation("IncidentOwner")
+  createdIncidents   Incident[]       @relation("IncidentCreator")
+  incidentNotes      IncidentNote[]
+  incidentActivities IncidentActivity[]
+  ownedTickets       Ticket[]         @relation("TicketOwner")
+  createdTickets     Ticket[]         @relation("TicketCreator")
+  ticketComments     TicketComment[]
+  notifications      Notification[]
+  chatMessages       ChatMessage[]
+  proposedActions    ResponseAction[] @relation("ActionProposer")
+  reviewedActions    ResponseAction[] @relation("ActionReviewer")
+  threatIntelCases   ThreatIntelCase[]
+  threatIntelCaseNotes ThreatIntelCaseNote[]
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String
+  outcome   String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([action])
+}
+
+model SavedHuntQuery {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  query     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model FindingNote {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  findingKey String
+  kind       String
+  status     String   @default("open")
+  note       String   @default("")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([userId, findingKey, kind])
+  @@index([kind])
+}
+
+model Incident {
+  id                   String             @id @default(cuid())
+  title                String
+  description          String             @default("")
+  severity             IncidentSeverity   @default(MEDIUM)
+  status               IncidentStatus     @default(OPEN)
+  ownerId              String?
+  owner                User?              @relation("IncidentOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  createdById          String
+  createdBy            User               @relation("IncidentCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  alertIndexId         String?
+  alertRuleId          String?
+  alertRuleDescription String?
+  agentName            String?
+  agentId              String?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  closedAt             DateTime?
+  notes                IncidentNote[]
+  activities           IncidentActivity[]
+  tickets              Ticket[]
+  threatIntelCases     ThreatIntelCase[]
+
+  @@index([status])
+  @@index([severity])
+  @@index([createdAt])
+}
+
+model ThreatIntelCase {
+  id          String   @id @default(cuid())
+  title       String
+  description String   @default("")
+  status      String   @default("open")
+  severity    String   @default("medium")
+  incidentId  String?
+  incident    Incident? @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  createdById String
+  createdBy   User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  entities    ThreatIntelCaseEntity[]
+  notes       ThreatIntelCaseNote[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([incidentId])
+}
+
+model ThreatIntelCaseEntity {
+  id         String          @id @default(cuid())
+  caseId     String
+  case       ThreatIntelCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  openctiId  String
+  entityType String
+  name       String
+  slug       String          @default("")
+  createdAt  DateTime        @default(now())
+
+  @@unique([caseId, openctiId])
+  @@index([caseId])
+}
+
+model ThreatIntelCaseNote {
+  id        String          @id @default(cuid())
+  caseId    String
+  case      ThreatIntelCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  body      String
+  createdAt DateTime        @default(now())
+
+  @@index([caseId])
+}
+
+model IncidentNote {
+  id         String   @id @default(cuid())
+  incidentId String
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  body       String
+  createdAt  DateTime @default(now())
+
+  @@index([incidentId])
+}
+
+model IncidentActivity {
+  id         String   @id @default(cuid())
+  incidentId String
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String
+  detail     String   @default("")
+  createdAt  DateTime @default(now())
+
+  @@index([incidentId])
+}
+
+model Ticket {
+  id              String         @id @default(cuid())
+  title           String
+  description     String         @default("")
+  priority        TicketPriority @default(MEDIUM)
+  status          TicketStatus   @default(OPEN)
+  ownerId         String?
+  owner           User?          @relation("TicketOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  createdById     String
+  createdBy       User           @relation("TicketCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  dueAt           DateTime?
+  incidentId      String?
+  incident        Incident?      @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  linkedAlertId   String?
+  linkedVulnId    String?
+  linkedAgentName String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  comments        TicketComment[]
+
+  @@index([status])
+  @@index([priority])
+  @@index([dueAt])
+}
+
+model TicketComment {
+  id        String   @id @default(cuid())
+  ticketId  String
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([ticketId])
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String    @default("")
+  type      String    @default("info")
+  href      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+  @@index([createdAt])
+}
+
+/// Singleton row id = "default"
+model ChatbotSettings {
+  id                     String   @id @default("default")
+  enabled                Boolean  @default(true)
+  provider               String   @default("openai")
+  model                  String   @default("gpt-4o-mini")
+  apiBaseUrl             String   @default("https://api.openai.com/v1")
+  apiKey                 String   @default("")
+  temperature            Float    @default(0.1)
+  maxTokens              Int      @default(1200)
+  systemPrompt           String   @db.Text
+  groundingEnabled       Boolean  @default(true)
+  requireCitations       Boolean  @default(true)
+  refuseIfNoEvidence     Boolean  @default(true)
+  maxEvidenceItems       Int      @default(12)
+  toolsEnabled           Boolean  @default(true)
+  suggestPlaybooks       Boolean  @default(true)
+  activeResponseEnabled  Boolean  @default(false)
+  dryRunDefault          Boolean  @default(true)
+  maxActionsPerDay       Int      @default(20)
+  updatedAt              DateTime @updatedAt
+  createdAt              DateTime @default(now())
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String
+  content   String   @db.Text
+  page      String?
+  evidence  Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+enum ResponseActionStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  EXECUTING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model Playbook {
+  id               String           @id @default(cuid())
+  key              String           @unique
+  name             String
+  description      String           @default("")
+  category         String           @default("containment")
+  actionType       String
+  command          String           @default("")
+  riskLevel        String           @default("medium")
+  requiresApproval Boolean          @default(true)
+  enabled          Boolean          @default(true)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  actions          ResponseAction[]
+}
+
+model ResponseAction {
+  id           String               @id @default(cuid())
+  playbookId   String?
+  playbook     Playbook?            @relation(fields: [playbookId], references: [id], onDelete: SetNull)
+  playbookKey  String
+  playbookName String
+  status       ResponseActionStatus @default(PROPOSED)
+  dryRun       Boolean              @default(true)
+  rationale    String               @db.Text
+  targetType   String?
+  targetId     String?
+  targetLabel  String?
+  agentId      String?
+  agentName    String?
+  incidentId   String?
+  params       Json?
+  result       Json?
+  proposedById String
+  proposedBy   User                 @relation("ActionProposer", fields: [proposedById], references: [id], onDelete: Restrict)
+  reviewedById String?
+  reviewedBy   User?                @relation("ActionReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt   DateTime?
+  executedAt   DateTime?
+  errorMessage String?
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+
+  @@index([status, createdAt])
+  @@index([incidentId])
+  @@index([proposedById, createdAt])
+}
+
+/// Singleton id = "default"
+model AppSettings {
+  id             String   @id @default("default")
+  timezone       String   @default("UTC")
+  dateFormat     String   @default("YYYY-MM-DD HH:mm")
+  defaultLanding String   @default("/app")
+  sessionHours   Int      @default(8)
+  smtpEnabled    Boolean  @default(false)
+  smtpHost       String   @default("")
+  smtpPort       Int      @default(587)
+  smtpUser       String   @default("")
+  smtpPass       String   @default("")
+  smtpFrom       String   @default("aegis@localhost")
+  updatedAt      DateTime @updatedAt
+  createdAt      DateTime @default(now())
+}
+
+model AuthToken {
+  id        String    @id @default(cuid())
+  email     String
+  userId    String?
+  type      String
+  tokenHash String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdBy String?
+  meta      Json?
+  createdAt DateTime  @default(now())
+
+  @@index([tokenHash])
+  @@index([email, type])
+}
+
+model RolePermission {
+  id        String  @id @default(cuid())
+  role      Role
+  module    String
+  canView   Boolean @default(true)
+  canCreate Boolean @default(false)
+  canUpdate Boolean @default(false)
+  canExport Boolean @default(false)
+  canAdmin  Boolean @default(false)
+
+  @@unique([role, module])
+}
+
+model NotificationRule {
+  id          String   @id @default(cuid())
+  name        String
+  enabled     Boolean  @default(true)
+  eventType   String
+  minSeverity String   @default("high")
+  channels    Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
