@@ -1,0 +1,310 @@
+# Coolify production stack — same containers as local Aegis + OpenCTI companion.
+#
+# In Coolify: New Resource → Git → Build Pack = Docker Compose
+#   Docker Compose Location: /docker-compose.coolify.yml
+#
+# Domains (Coolify UI or SERVICE_URL_* below):
+#   frontend → https://aegis.example.com:80
+#   opencti  → https://opencti.example.com:8080
+#
+# Do NOT publish host ports for HTTP; Coolify proxy routes by domain.
+# Postgres / Redis / ES / MinIO / RabbitMQ stay internal-only.
+
+name: aegis
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aegis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:-aegis}
+    volumes:
+      - aegis_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aegis}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-aegis}?schema=public
+      PORT: 4000
+      HOST: 0.0.0.0
+      JWT_SECRET: ${JWT_SECRET:?}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # Public Aegis URL (Coolify generates SERVICE_URL_FRONTEND_80)
+      CORS_ORIGIN: ${CORS_ORIGIN:-${SERVICE_URL_FRONTEND_80}}
+      WAZUH_API_URL: ${WAZUH_API_URL:-}
+      WAZUH_API_USER: ${WAZUH_API_USER:-}
+      WAZUH_API_PASSWORD: ${WAZUH_API_PASSWORD:-}
+      WAZUH_INDEXER_URL: ${WAZUH_INDEXER_URL:-}
+      WAZUH_INDEXER_USER: ${WAZUH_INDEXER_USER:-}
+      WAZUH_INDEXER_PASSWORD: ${WAZUH_INDEXER_PASSWORD:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      # Same Docker network as OpenCTI (not host.docker.internal)
+      OPENCTI_URL: ${OPENCTI_URL:-http://opencti:8080}
+      OPENCTI_TOKEN: ${OPENCTI_TOKEN:-${OPENCTI_ADMIN_TOKEN}}
+      OPENCTI_STREAM_ID: ${OPENCTI_STREAM_ID:-}
+      OPENCTI_UI_URL: ${OPENCTI_UI_URL:-${SERVICE_URL_OPENCTI_8080}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+      args:
+        VITE_API_URL: ""
+    restart: unless-stopped
+    environment:
+      # Coolify assigns a public domain → container port 80
+      SERVICE_URL_FRONTEND_80: /
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # --- OpenCTI companion (same images/services as docker-compose.opencti.yml) ---
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    volumes:
+      - opencti_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    restart: unless-stopped
+    volumes:
+      - opencti_es:/usr/share/elasticsearch/data
+    environment:
+      - discovery.type=single-node
+      - xpack.ml.enabled=false
+      - xpack.security.enabled=false
+      - thread_pool.search.queue_size=5000
+      - "ES_JAVA_OPTS=-Xms${ELASTIC_MEMORY_SIZE:-2G} -Xmx${ELASTIC_MEMORY_SIZE:-2G}"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s http://localhost:9200/_cluster/health?wait_for_status=yellow >/dev/null || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  minio:
+    image: pgsty/silo:latest
+    restart: unless-stopped
+    volumes:
+      - opencti_s3:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
+    command: server /data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 25s
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?}
+    volumes:
+      - ./opencti/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - opencti_amqp:/var/lib/rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 20s
+      timeout: 20s
+      retries: 5
+
+  opencti:
+    image: opencti/platform:6.4.8
+    restart: unless-stopped
+    environment:
+      SERVICE_URL_OPENCTI_8080: /
+      NODE_OPTIONS: --max-old-space-size=4096
+      APP__PORT: 8080
+      APP__BASE_URL: ${OPENCTI_EXTERNAL_URL:-${SERVICE_URL_OPENCTI_8080}}
+      APP__ADMIN__EMAIL: ${OPENCTI_ADMIN_EMAIL:?}
+      APP__ADMIN__PASSWORD: ${OPENCTI_ADMIN_PASSWORD:?}
+      APP__ADMIN__TOKEN: ${OPENCTI_ADMIN_TOKEN:?}
+      APP__APP_LOGS__LOGS_LEVEL: error
+      REDIS__HOSTNAME: redis
+      REDIS__PORT: 6379
+      ELASTICSEARCH__URL: http://elasticsearch:9200
+      ELASTICSEARCH__NUMBER_OF_REPLICAS: 0
+      MINIO__ENDPOINT: minio
+      MINIO__PORT: 9000
+      MINIO__USE_SSL: "false"
+      MINIO__ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO__SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      RABBITMQ__HOSTNAME: rabbitmq
+      RABBITMQ__PORT: 5672
+      RABBITMQ__PORT_MANAGEMENT: 15672
+      RABBITMQ__MANAGEMENT_SSL: "false"
+      RABBITMQ__USERNAME: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ__PASSWORD: ${RABBITMQ_DEFAULT_PASS}
+      SMTP__HOSTNAME: ${SMTP_HOSTNAME:-localhost}
+      SMTP__PORT: 25
+      PROVIDERS__LOCAL__STRATEGY: LocalStrategy
+      APP__HEALTH_ACCESS_KEY: ${OPENCTI_HEALTHCHECK_ACCESS_KEY:?}
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-qO-",
+          "http://localhost:8080/health?health_access_key=${OPENCTI_HEALTHCHECK_ACCESS_KEY}",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+
+  worker:
+    image: opencti/worker:6.4.8
+    restart: unless-stopped
+    environment:
+      OPENCTI_URL: http://opencti:8080
+      OPENCTI_TOKEN: ${OPENCTI_ADMIN_TOKEN}
+      WORKER_LOG_LEVEL: info
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+  connector-export-file-stix:
+    image: opencti/connector-export-file-stix:6.4.8
+    restart: unless-stopped
+    environment:
+      OPENCTI_URL: http://opencti:8080
+      OPENCTI_TOKEN: ${OPENCTI_ADMIN_TOKEN}
+      CONNECTOR_ID: ${CONNECTOR_EXPORT_FILE_STIX_ID:?}
+      CONNECTOR_TYPE: INTERNAL_EXPORT_FILE
+      CONNECTOR_NAME: ExportFileStix2
+      CONNECTOR_SCOPE: application/json
+      CONNECTOR_LOG_LEVEL: error
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+  connector-export-file-csv:
+    image: opencti/connector-export-file-csv:6.4.8
+    restart: unless-stopped
+    environment:
+      OPENCTI_URL: http://opencti:8080
+      OPENCTI_TOKEN: ${OPENCTI_ADMIN_TOKEN}
+      CONNECTOR_ID: ${CONNECTOR_EXPORT_FILE_CSV_ID:?}
+      CONNECTOR_TYPE: INTERNAL_EXPORT_FILE
+      CONNECTOR_NAME: ExportFileCsv
+      CONNECTOR_SCOPE: text/csv
+      CONNECTOR_LOG_LEVEL: error
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+  connector-import-file-stix:
+    image: opencti/connector-import-file-stix:6.4.8
+    restart: unless-stopped
+    environment:
+      OPENCTI_URL: http://opencti:8080
+      OPENCTI_TOKEN: ${OPENCTI_ADMIN_TOKEN}
+      CONNECTOR_ID: ${CONNECTOR_IMPORT_FILE_STIX_ID:?}
+      CONNECTOR_TYPE: INTERNAL_IMPORT_FILE
+      CONNECTOR_NAME: ImportFileStix
+      CONNECTOR_VALIDATE_BEFORE_IMPORT: "true"
+      CONNECTOR_SCOPE: application/json,text/xml
+      CONNECTOR_AUTO: "true"
+      CONNECTOR_LOG_LEVEL: error
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+  connector-opencti:
+    image: opencti/connector-opencti:6.4.8
+    restart: unless-stopped
+    environment:
+      OPENCTI_URL: http://opencti:8080
+      OPENCTI_TOKEN: ${OPENCTI_ADMIN_TOKEN}
+      CONNECTOR_ID: ${CONNECTOR_OPENCTI_ID:?}
+      CONNECTOR_NAME: OpenCTI Datasets
+      CONNECTOR_SCOPE: marking-definition,identity,location
+      CONNECTOR_LOG_LEVEL: info
+      CONNECTOR_DURATION_PERIOD: PT24H
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+  connector-mitre:
+    image: opencti/connector-mitre:6.4.8
+    restart: unless-stopped
+    environment:
+      OPENCTI_URL: http://opencti:8080
+      OPENCTI_TOKEN: ${OPENCTI_ADMIN_TOKEN}
+      CONNECTOR_ID: ${CONNECTOR_MITRE_ID:?}
+      CONNECTOR_NAME: MITRE ATT&CK
+      CONNECTOR_SCOPE: identity,attack-pattern,course-of-action,intrusion-set,malware,tool,report,vulnerability
+      CONNECTOR_LOG_LEVEL: info
+      CONNECTOR_DURATION_PERIOD: P7D
+    depends_on:
+      opencti:
+        condition: service_healthy
+
+volumes:
+  aegis_pg_data:
+  opencti_es:
+  opencti_s3:
+  opencti_redis:
+  opencti_amqp:

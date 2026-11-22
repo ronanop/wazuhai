@@ -38,6 +38,9 @@ import { Role } from "@prisma/client";
 
 const app = express();
 
+// Required behind Coolify / Traefik so secure cookies and client IPs work on HTTPS
+app.set("trust proxy", 1);
+
 app.use(
   cors({
     origin: config.corsOrigin,

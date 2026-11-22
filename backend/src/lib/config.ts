@@ -12,7 +12,8 @@ export const config = {
   jwtSecret: required("JWT_SECRET", "aegis_dev_jwt_change_me_in_production_32chars"),
   jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? "8h",
   cookieSecure: process.env.COOKIE_SECURE === "true",
-  corsOrigin: process.env.CORS_ORIGIN ?? "http://localhost:5173",
+  // Strip trailing slash — Coolify SERVICE_URL_* / browser Origin must match
+  corsOrigin: (process.env.CORS_ORIGIN ?? "http://localhost:5173").replace(/\/$/, ""),
   cookieName: "aegis_session",
   wazuh: {
     apiUrl: process.env.WAZUH_API_URL ?? "https://192.168.191.128:55000",

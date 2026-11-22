@@ -7,11 +7,16 @@ Self-hosted OpenCTI Community Edition used by the Aegis **Global Threat Intel** 
 - Docker Desktop with **≥8 GB RAM** allocated (Elasticsearch alone uses ~2G here)
 - On WSL2 / Linux: `sudo sysctl -w vm.max_map_count=1048575`
 
-## Start
+## Coolify
+
+On Coolify, OpenCTI runs **inside** [`docker-compose.coolify.yml`](../docker-compose.coolify.yml) with Aegis (same images/services). See [`COOLIFY.md`](../COOLIFY.md). Use `opencti/.env.example` as a reference for variable names; set values in the Coolify UI (do not commit `opencti/.env`).
+
+## Start (local)
 
 From the repo root:
 
 ```bash
+cp opencti/.env.example opencti/.env   # then edit secrets / UUIDs
 docker compose -f docker-compose.opencti.yml --env-file opencti/.env up -d
 ```
 

@@ -19,6 +19,10 @@ docker compose up --build
 - App: http://localhost:5173
 - API: http://localhost:4000/api/health
 
+### Coolify (Ubuntu production)
+
+Same containers as local (Aegis + OpenCTI) via [`docker-compose.coolify.yml`](docker-compose.coolify.yml). See **[COOLIFY.md](COOLIFY.md)** for install, env vars, and domains.
+
 ### Demo users
 
 | Email | Password | Role |
